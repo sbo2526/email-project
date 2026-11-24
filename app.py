@@ -186,6 +186,39 @@ def list_mailboxes():
     return jsonify([dict(row) for row in rows])
 
 
+# Realistic first and last names (Finglish Persian + international) used to
+# auto-generate address names like ali.ahmadi or emma.walker42.
+FIRST_NAMES = (
+    'ali', 'reza', 'mohammad', 'hossein', 'mahdi', 'mehdi', 'amir', 'hamed', 'arman', 'sina', 'sadegh', 'kaveh',
+    'zahra', 'sara', 'maryam', 'fatemeh', 'shirin', 'parisa', 'nazanin', 'mahsa', 'elham', 'leila', 'niloufar', 'sahar',
+    'james', 'john', 'robert', 'michael', 'david', 'william', 'richard', 'joseph', 'thomas', 'daniel', 'matthew', 'andrew',
+    'emma', 'olivia', 'sophia', 'isabella', 'amelia', 'emily', 'grace', 'chloe', 'lucas', 'ethan', 'noah', 'liam',
+)
+LAST_NAMES = (
+    'ahmadi', 'mohammadi', 'hosseini', 'rezaei', 'karimi', 'moradi', 'javadi', 'kazemi', 'rahimi', 'ghasemi', 'bagheri', 'salehi',
+    'naderi', 'yousefi', 'sadeghi', 'alipour', 'mokhtari', 'soleimani', 'shirazi', 'tehrani', 'esfahani', 'tabrizi', 'norouzi', 'mahmoudi',
+    'smith', 'johnson', 'williams', 'brown', 'jones', 'garcia', 'miller', 'davis', 'wilson', 'anderson', 'taylor', 'moore',
+    'martin', 'clark', 'lewis', 'walker', 'hall', 'allen', 'young', 'king', 'wright', 'scott', 'green', 'baker',
+)
+
+
+def generated_username():
+    """A realistic address name: a first name plus a surname, lightly varied."""
+    first, last = secrets.choice(FIRST_NAMES), secrets.choice(LAST_NAMES)
+    style = secrets.choice(('dot', 'dot', 'dot', 'dot', 'reverse', 'underscore', 'underscore', 'join'))
+    if style == 'reverse':
+        base = last + '.' + first
+    elif style == 'underscore':
+        base = first + '_' + last
+    elif style == 'join':
+        base = first + last
+    else:
+        base = first + '.' + last
+    if secrets.randbelow(10) < 4:
+        base += str(secrets.randbelow(90) + 10)
+    return base[:24]
+
+
 @app.post('/api/mailboxes')
 def create_mailbox():
     data = request.get_json(silent=True) or {}
@@ -195,8 +228,9 @@ def create_mailbox():
     username = username.strip().lower()
     if username and not re.fullmatch(r'[a-z0-9][a-z0-9._-]{2,23}', username):
         return jsonify(error='نام باید ۳ تا ۲۴ کاراکتر و شامل حروف انگلیسی، عدد، نقطه، خط تیره یا زیرخط باشد.'), 400
-    if not username:
-        username = 'mail' + secrets.token_hex(6)
+    auto_name = not username
+    if auto_name:
+        username = generated_username()
     domains = api('GET', '/domains')
     members = domains.get('hydra:member', domains.get('member', []))
     available = [x.get('domain') for x in members if x.get('isActive') and not x.get('isPrivate') and x.get('domain')]
@@ -204,7 +238,19 @@ def create_mailbox():
         raise ProviderError('در حال حاضر دامنه‌ای از طرف سرویس در دسترس نیست.')
     address = username + '@' + available[0]
     password = secrets.token_urlsafe(24)
-    api('POST', '/accounts', {'address': address, 'password': password})
+    # When the name is drawn automatically, a "taken" response just means we draw
+    # another name; a user-chosen name keeps the original error so the person can pick a different one.
+    for attempt in range(6):
+        try:
+            api('POST', '/accounts', {'address': address, 'password': password})
+            break
+        except ProviderError as error:
+            if error.status != 400 or not auto_name:
+                raise
+            if attempt == 5:
+                raise ProviderError('ساخت نام خودکار چند بار ناموفق بود؛ لطفاً دوباره تلاش کنید.', 502)
+            username = generated_username()
+            address = username + '@' + available[0]
     # Record credentials immediately after creation; do not require a second remote call.
     try:
         with db() as con:

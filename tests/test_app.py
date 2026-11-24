@@ -59,6 +59,36 @@ class AppTest(unittest.TestCase):
     def test_invalid_username(self):
         self.login()
         self.assertEqual(self.post('/api/mailboxes', {'username':'bad @ name'}).status_code,400)
+    def test_auto_generated_realistic_name(self):
+        self.login()
+        with patch('app.api', side_effect=provider):
+            result = self.post('/api/mailboxes', {})
+            self.assertEqual(result.status_code,201)
+            local = result.json['address'].split('@')[0]
+            self.assertRegex(local, r'^[a-z][a-z0-9._-]{2,23}$')
+            self.assertFalse(local.startswith('mail'))
+    def test_auto_name_retries_when_taken(self):
+        self.login()
+        state = {'calls': 0}
+        def flaky(method, path, payload=None, token=None):
+            if path == '/accounts':
+                state['calls'] += 1
+                if state['calls'] == 1:
+                    raise app.ProviderError('taken', 400)
+            return provider(method, path, payload, token)
+        with patch('app.api', side_effect=flaky):
+            result = self.post('/api/mailboxes', {})
+        self.assertEqual(result.status_code,201)
+        self.assertEqual(state['calls'],2)
+    def test_user_chosen_taken_name_not_replaced(self):
+        self.login()
+        def always_taken(method, path, payload=None, token=None):
+            if path == '/domains':
+                return provider(method, path)
+            raise app.ProviderError('taken', 400)
+        with patch('app.api', side_effect=always_taken):
+            result = self.post('/api/mailboxes', {'username':'sample'})
+        self.assertEqual(result.status_code,400)
     def test_remote_failure(self):
         self.login()
         with patch('app.api', side_effect=app.ProviderError('limited',429)):
